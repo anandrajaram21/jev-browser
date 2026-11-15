@@ -9,10 +9,11 @@ import { buildMoves, type Move } from "./moves.ts";
 import type { TextModel } from "./text.ts";
 
 const MAX_CHOICES = 255;
-const VISION_MIN_CONFIDENCE = 0.3;
+const VISION_MIN_CONFIDENCE = 0.5; // a 0.4 box clicked blind coordinates on a read-only check in testing
 const LOST_CONFIDENCE = 0.2; // two steps in a row below this: Jev is guessing, hand back to the caller
 const CHAIN_MIN_CONFIDENCE = 0.85; // a speculative pick for a later step must be at least this sure to run unobserved
 const MAX_LOOKAHEAD = 8; // steps whose moves are picked in one request
+const MAX_NOOP_ROUNDS = 3; // rounds in a row whose action left the page unchanged: looping (scroll up/down, reload), stop
 
 export interface AgentOptions {
   browser: Browser;
@@ -44,6 +45,7 @@ export interface StepRecord {
 export interface RunResult {
   ok: boolean;
   reason: "done" | "max_steps" | "stuck" | "uncertain" | "error";
+  warnings?: string[];
   goal: string;
   url: string;
   answer?: string;
@@ -62,6 +64,22 @@ export interface Task {
   observe?: string[]; // statements to verify on the final page (e.g. a bug's symptom); reported, not acted on
   expect?: string; // the correct behaviour; with `observe`, Jev picks bug vs expected vs neither
   steps?: string[]; // ordered steps (e.g. a bug report's repro steps); Jev works through them one at a time
+  viewport?: { width: number; height: number }; // set before opening startUrl; stays set for the session
+  answerFormat?: string; // the caller's output format; the final answer is written in it
+  labels?: { bug: string; noBug: string }; // the caller's verdict words, used in the formatted answer
+}
+
+const round = (n: number) => Math.round(n * 1000) / 1000;
+const roundAll = <K extends string>(o: Record<K, number>) => Object.fromEntries(Object.entries<number>(o).map(([k, v]) => [k, round(v)])) as Record<K, number>;
+
+/** Same page, ignoring a trailing slash and the fragment. */
+export function samePage(a: string, b: string): boolean {
+  try {
+    const [x, y] = [new URL(a), new URL(b)];
+    return x.origin === y.origin && x.pathname.replace(/\/$/, "") === y.pathname.replace(/\/$/, "") && x.search === y.search;
+  } catch {
+    return a === b;
+  }
 }
 
 export async function runAgent(task: Task, opts: AgentOptions): Promise<RunResult> {
@@ -75,12 +93,19 @@ export async function runAgent(task: Task, opts: AgentOptions): Promise<RunResul
   let stepIdx = 0; // first task step not yet confirmed done
   let executedUpTo = -1; // highest step index an action has been run for (confirmation pending)
   let snap: Snapshot | undefined;
+  let lastPage: number | bigint | undefined; // fingerprint of the page the last round acted on
+  let noopRounds = 0;
+  const warnings: string[] = [];
 
   const finish = (r: Omit<RunResult, "goal" | "steps" | "totalMs" | "url">): RunResult => ({
-    ...r, goal: task.goal, url: snap?.url ?? "", steps, totalMs: Math.round(performance.now() - started),
+    ...r, ...(warnings.length ? { warnings } : {}), goal: task.goal, url: snap?.url ?? "", steps, totalMs: Math.round(performance.now() - started),
   });
 
   try {
+    if (task.viewport) {
+      await browser.setViewport(task.viewport.width, task.viewport.height);
+      log(`   viewport ${task.viewport.width}x${task.viewport.height}`);
+    }
     if (task.startUrl && task.startUrl !== opts.openedUrl) {
       const t = performance.now();
       await browser.run("open", task.startUrl);
@@ -92,6 +117,12 @@ export async function runAgent(task: Task, opts: AgentOptions): Promise<RunResul
       snap = await browser.snapshot();
       if (prevUrl && prevUrl !== snap.url && history.length) history[history.length - 1] += ` → now on ${snap.url}`;
       if (prevUrl && prevUrl !== snap.url && steps.at(-1)?.moveId?.endsWith(":click")) spent.add(`${prevUrl} ${steps.at(-1)!.moveId}`);
+      // An action that left the page exactly as it was won't do anything the
+      // second time either (scroll at the end of a page, reload, a dead button).
+      const page = Bun.hash(`${snap.url}\n${snap.text}\n${snap.visibleText}`);
+      const unchanged = page === lastPage;
+      if (unchanged && steps.at(-1)?.moveId && !steps.at(-1)!.move.includes(" ⇢ ")) spent.add(`${snap.url} ${steps.at(-1)!.moveId}`);
+      lastPage = page;
       const moves = buildMoves(snap.elements, task.inputs, !!opts.text).filter((m) => {
         const key = `${snap!.url} ${m.id}`;
         return (repeats.get(key) ?? 0) < 3 && !spent.has(key);
@@ -100,19 +131,44 @@ export async function runAgent(task: Task, opts: AgentOptions): Promise<RunResul
       const t0 = performance.now();
       const decision = await decide(task, stepIdx, executedUpTo, snap, moves, history, opts);
       const jevMs = Math.round(performance.now() - t0);
+      const progressed = decision.stepIdx > stepIdx;
       for (; stepIdx < decision.stepIdx; stepIdx++) log(`   step ${stepIdx + 1} done: ${task.steps![stepIdx]}`);
 
       // Jev's choice and its checks are separate questions; finish when the checks
       // are confident, or when Jev picks "finish" and the checks lean yes.
       if (decision.done || (decision.move?.kind === "finish" && decision.doneP >= 0.5)) {
         log(`✓ done after ${step - 1} actions (jev ${jevMs}ms, p=${decision.doneP.toFixed(2)})`);
+        const { verdict } = decision;
+        if (task.observe?.length && !task.steps?.length && task.startUrl && !samePage(snap.url, task.startUrl)) {
+          warnings.push(`ended on ${snap.url}, not the start page ${task.startUrl}; the verdict is about the page it ended on`);
+        }
+        // "Neither" is not "not reproduced": say so rather than hand back a confident-looking verdict.
+        const unclear = !!verdict && verdict.probabilities.neither > Math.max(verdict.probabilities.bug, verdict.probabilities.expected);
+        if (unclear) warnings.push("the page matched neither the reported nor the expected behaviour; check the page or the steps");
         let answer: string | undefined;
-        if (decision.needsAnswer && opts.text && !task.observe?.length) {
+        if (opts.text && (task.answerFormat || (decision.needsAnswer && !task.observe?.length))) {
           const t = performance.now();
-          answer = await opts.text.answer(task.goal, snap.visibleText);
+          // The layout line only for layout checks; otherwise the evidence drifted to it.
+          const aboutLayout = !!task.viewport || /\b(scroll\w*|wid(e|er|th)|cut off|overflow\w*)\b/i.test(`${task.goal} ${task.observe?.join(" ")}`);
+          const page = aboutLayout ? `${snap.layout}\n${snap.visibleText}` : snap.visibleText;
+          answer = verdict && task.answerFormat
+            ? await opts.text.verdictAnswer(task.answerFormat, {
+                label: task.labels && (verdict.reproduced ? task.labels.bug : task.labels.noBug),
+                otherLabel: task.labels && (verdict.reproduced ? task.labels.noBug : task.labels.bug),
+                reproduced: verdict.reproduced,
+                shows: verdict.reproduced ? task.observe!.join(" ") : (task.expect ?? "not the reported behaviour"),
+              }, page)
+            : await opts.text.answer(task.goal, page, task.answerFormat);
           log(`   answer (${Math.round(performance.now() - t)}ms)`);
         }
-        return finish({ ok: true, reason: "done", answer, observed: decision.observed, verdict: decision.verdict });
+        if (unclear) return finish({ ok: false, reason: "uncertain", error: "verdict unclear: the page matched neither behaviour", answer, observed: decision.observed, verdict });
+        return finish({ ok: true, reason: "done", answer, observed: decision.observed, verdict });
+      }
+
+      noopRounds = unchanged && !progressed ? noopRounds + 1 : 0;
+      if (noopRounds >= MAX_NOOP_ROUNDS) {
+        log(`? the last ${noopRounds} actions didn't change the page; handing back`);
+        return finish({ ok: false, reason: "stuck", error: `looping: the last ${noopRounds} actions didn't change the page` });
       }
 
       lostSteps = decision.confidence < LOST_CONFIDENCE ? lostSteps + 1 : 0;
@@ -159,7 +215,7 @@ export async function runAgent(task: Task, opts: AgentOptions): Promise<RunResul
 
       if (move) repeats.set(`${snap.url} ${move.id}`, (repeats.get(`${snap.url} ${move.id}`) ?? 0) + 1);
       history.push(desc);
-      steps.push({ step, url: snap.url, moveId: move?.id, move: desc, confidence: decision.confidence, doneP: decision.doneP, jevMs, actMs });
+      steps.push({ step, url: snap.url, moveId: move?.id, move: desc, confidence: round(decision.confidence), doneP: round(decision.doneP), jevMs, actMs });
       log(`${String(step).padStart(2)} ${task.steps ? `[${stepIdx + 1}] ` : ""}${desc}  (conf ${decision.confidence.toFixed(2)}, p(done) ${decision.doneP.toFixed(2)}, jev ${jevMs}ms, act ${actMs}ms)`);
     }
     return finish({ ok: false, reason: "max_steps" });
@@ -198,13 +254,16 @@ async function decide(
     current_url: snap.url,
     visible_text: snap.visibleText.slice(0, opts.pageChars),
     interactive_elements: snap.text.slice(0, opts.pageChars),
+    ...(snap.layout ? { layout: snap.layout } : {}),
     actions_so_far: history.slice(-10),
   };
   // Specific end-state checks separate "the info is somewhere on screen" from
   // "the task is actually finished" far better than one generic done question.
+  // A check with no steps (observe only) is read-only: it's done on the page it
+  // was opened on, so Jev never wanders off to judge another page.
   const checks = task.checks?.length
     ? task.checks
-    : steps.length
+    : steps.length || task.observe?.length
       ? []
       : ["Given the current page and the actions so far, the goal is achieved: every requested action has been carried out, and any requested information is visible on the current page."];
   const ask = (step?: string) =>
@@ -222,6 +281,11 @@ async function decide(
     needs_answer: noul("The goal asks for information to be reported back (not only for an action to be performed)."),
   };
   checks.forEach((c, i) => (questions[`check_${i}`] = noul(c)));
+  // Without planned checks, a goal that only asks to look something up is done
+  // as soon as the page answers it; the generic check alone sent Jev scrolling
+  // and reloading a page that already had the answer.
+  const generic = !task.checks?.length && !steps.length && !task.observe?.length;
+  if (generic) questions.answerable = noul("The current page already shows everything needed to answer the goal, so no action is needed.");
   // Steps: confirm the current step and any steps already acted on, and pick a
   // move for each upcoming step, all in this one (parallel) request.
   const verifyTo = Math.min(steps.length - 1, Math.max(stepIdx, executedUpTo));
@@ -238,7 +302,9 @@ async function decide(
   const [{ answers }, judged] = await Promise.all([
     opts.jev.systemOne({ state, questions, model: opts.model }),
     task.observe?.length ? judgePage(task, snap, opts) : undefined,
-  ]);
+  ]).catch((err: unknown) => {
+    throw new Error(`jev (${opts.model}): ${err instanceof Error ? err.message : String(err)}`);
+  });
   const p = (k: string) => (answers[k] as { noul: number }).noul;
   const byId = new Map(moves.map((m) => [m.id, m]));
   const pickFor = (key: string | number) => {
@@ -255,7 +321,8 @@ async function decide(
   }
   let next = stepIdx;
   while (next <= verifyTo && p(`done_${next}`) >= (next <= executedUpTo ? STEP_DONE_EXECUTED : STEP_DONE_UNTOUCHED)) next++;
-  const checksP = checks.length ? Math.min(...checks.map((_, i) => p(`check_${i}`))) : 1;
+  let checksP = checks.length ? Math.min(...checks.map((_, i) => p(`check_${i}`))) : 1;
+  if (generic && p("needs_answer") >= 0.5) checksP = Math.max(checksP, p("answerable"));
   const doneP = steps.length ? (next >= steps.length ? Math.min(checksP, p(`done_${steps.length - 1}`)) : 0) : checksP;
   const { observed, verdict } = judged ?? {};
   const base = {
@@ -313,6 +380,7 @@ async function judgePage(task: Task, snap: Snapshot, opts: AgentOptions) {
     current_url: snap.url,
     visible_text: snap.visibleText.slice(0, opts.pageChars),
     interactive_elements: snap.text.slice(0, opts.pageChars),
+    ...(snap.layout ? { layout: snap.layout } : {}),
   };
   const bug = task.observe!.join(" ");
   const instructions = "Which best describes what the current page shows?";
@@ -324,12 +392,12 @@ async function judgePage(task: Task, snap: Snapshot, opts: AgentOptions) {
     questions.verdict_b = choice(instructions, { expected: task.expect, bug, neither });
   }
   const { answers } = await opts.jev.systemOne({ state, questions, model: opts.model });
-  const observed = Object.fromEntries(task.observe!.map((o, i) => [o, (answers[`observe_${i}`] as { noul: number }).noul]));
+  const observed = Object.fromEntries(task.observe!.map((o, i) => [o, round((answers[`observe_${i}`] as { noul: number }).noul)]));
   if (!task.expect) return { observed, verdict: undefined };
   const [a, b] = [answers.verdict_a, answers.verdict_b] as Pick[];
   const avg = (k: string) => (a!.probabilities[k]! + b!.probabilities[k]!) / 2;
   const probabilities = { bug: avg("bug"), expected: avg("expected"), neither: avg("neither") };
-  return { observed, verdict: { reproduced: probabilities.bug > Math.max(probabilities.expected, probabilities.neither), probabilities } };
+  return { observed, verdict: { reproduced: probabilities.bug > Math.max(probabilities.expected, probabilities.neither), probabilities: roundAll(probabilities) } };
 }
 
 /** The element a move acts on, so a chain never touches the same element twice. */

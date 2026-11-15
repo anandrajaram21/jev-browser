@@ -1,6 +1,6 @@
 {
   "name": "jev-browser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Skill for handing well-defined browser tasks and bug reproductions to the jev-browser CLI",
   "author": {
     "name": "Anand Rajaram"

@@ -58,9 +58,11 @@ jev-browser --session <name> "<task in plain English>"
   ```
 
   Describe `--observe`/`--expect` by text or element state the page actually shows (a total, a message, a checkbox being checked), not by styling such as "crossed out". The output is `REPRODUCED` or `NOT REPRODUCED` with probabilities for bug / expected / neither. Steps can include reloads ("Reload the page"), navigation, typing (pass literal values as `--input` too), checkboxes, selects and tabs. To reproduce several bugs, run them in parallel with separate `--session` names in a single shell command (`cmd1 & cmd2 & wait`).
+- **Checking a claim on a page, with a fixed answer format: pass the task verbatim.** A task such as "Open <url> and check X. Decide whether the report is valid. Answer with exactly two lines: VERDICT: VALID or NOT REPRODUCIBLE / EVIDENCE: …" is planned as a check: the steps (often none), the reported behaviour and the correct one. Jev decides the verdict, and stdout holds only the answer in the requested format, using the task's own verdict words. A check with no steps is judged on the page it opens and takes no actions. A requested window size ("set the viewport to 375x812") is applied before the page is judged; the page's width against the viewport is measured, so horizontal-scrolling checks work. Use `--answer-format "<format>"` to set the format yourself, and `--viewport 375x812` for the size.
 - Without `--check` or `--step`, a small model plans from the task text alone (slower, less reliable).
-- If it exits with `uncertain`, Jev had no confident next move. The goal may already be met, so look at the page with agent-browser before retrying.
-- Answers to questions are printed on stdout; progress goes to stderr. Use `--json` for a structured result (`ok`, `reason`, `answer`, `url`, per-step moves and timings).
+- If it exits with `uncertain`, Jev had no confident next move. The goal may already be met, so look at the page with agent-browser before retrying. `stuck` with "looping" means its last actions didn't change the page. A verdict where `neither` wins also exits `uncertain` (code 1): look at the page rather than trusting the verdict line.
+- Read `warning:` lines on stderr (or `warnings` in `--json`): e.g. the verdict matched neither behaviour, or the run ended on a different page from the one it was asked to check.
+- Answers to questions are printed on stdout; progress goes to stderr. Use `--json` for a structured result (`ok`, `reason`, `answer`, `verdict`, `warnings`, `url`, per-step moves and timings).
 - Exit code 0 means Jev judged the task done. Non-zero means `max_steps`, `stuck` or `error`: take over with agent-browser from the page it stopped on.
 
 ## Good fits

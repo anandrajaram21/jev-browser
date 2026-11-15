@@ -5,7 +5,7 @@ import pkg from "../package.json";
 import { runAgent, type Task } from "./agent.ts";
 import { Browser } from "./browser.ts";
 import { CONFIG_PATH, doctor, installSkill, loadConfig, setup } from "./setup.ts";
-import { TextModel, textModelFromEnv } from "./text.ts";
+import { type Plan, TextModel, textModelFromEnv } from "./text.ts";
 import { update } from "./update.ts";
 
 const HELP = `jev-browser - fast browser agent: agent-browser acts, TypeSafe Jev decides
@@ -37,8 +37,11 @@ Options:
                         Reported as a probability; replaces the text-model answer
   --expect <statement>  The correct behaviour. With --observe, Jev gives a verdict:
                         bug reproduced vs expected behaviour vs neither
+  --answer-format <text> Write the final answer in this format, e.g. "VERDICT: VALID or NOT
+                        REPRODUCIBLE / EVIDENCE: one sentence" (found in the task text when planned)
+  --viewport <WxH>      Set the browser viewport first, e.g. 375x812 (stays set for the session)
   --no-plan             Don't call the text model to extract goal/start URL/inputs/checks
-                        (implied when --check is given: the caller has already planned)
+                        (implied when --check or --step is given: the caller has already planned)
   --no-vision           Disable the Jev screenshot (box) fallback
   --max-steps <n>       Give up after n actions (default 25)
   --min-confidence <n>  Below this Jev confidence, try the vision fallback (default 0.3)
@@ -67,6 +70,10 @@ const bufferedFetch = async (input: string, init?: RequestInit) => {
 };
 
 const JEV_INPUT_USD_PER_MTOK = 0.042; // TypeSafe list price for jev-1.13/1.14 input; output is free
+
+// Float noise such as 0.9299999999999999 in JSON output.
+const roundUsage = (u: unknown): unknown =>
+  typeof u === "number" ? (Number.isInteger(u) ? u : Number(u.toPrecision(6))) : u && typeof u === "object" ? Object.fromEntries(Object.entries(u).map(([k, v]) => [k, roundUsage(v)])) : u;
 
 const jevClient = () => new TypeSafeClient({ fetch: bufferedFetch, timeout: 8000, logLevel: "error" });
 
@@ -99,6 +106,8 @@ async function main() {
       expect: { type: "string" },
       step: { type: "string", multiple: true },
       report: { type: "string" },
+      "answer-format": { type: "string" },
+      viewport: { type: "string" },
       "no-plan": { type: "boolean" },
       "no-vision": { type: "boolean" },
       "max-steps": { type: "string" },
@@ -134,35 +143,47 @@ async function main() {
     }),
   );
 
-  const callerParts = { observe: values.observe, expect: values.expect, steps: values.step };
+  const viewport = values.viewport?.match(/^(\d+)\s*[x×,]\s*(\d+)$/);
+  if (values.viewport && !viewport) throw new Error(`--viewport expects WIDTHxHEIGHT, got "${values.viewport}"`);
+  const callerParts = {
+    observe: values.observe, expect: values.expect, steps: values.step, answerFormat: values["answer-format"],
+    viewport: viewport ? { width: Number(viewport[1]), height: Number(viewport[2]) } : undefined,
+  };
   const browser = new Browser(values.session ?? process.env.AGENT_BROWSER_SESSION ?? "default", passthrough);
+  const planning = !!report || (!!text && !values["no-plan"] && !values.check?.length && !values.step?.length);
   // Launching a fresh session's browser takes ~0.5s; overlap it with planning.
-  // A report almost always names its start URL, so open that speculatively.
-  const guessedUrl = values.url ?? report?.match(/https?:\/\/[^\s"'<>)]+/)?.[0]?.replace(/[.,;:]+$/, "");
-  const warm = report || (text && !values["no-plan"])
+  // A report or task almost always names its start URL, so open that speculatively.
+  const guessedUrl = values.url ?? (planning ? report ?? taskText : "").match(/https?:\/\/[^\s"'<>)]+/)?.[0]?.replace(/[.,;:]+$/, "");
+  const warm = planning
     ? browser.run("open", guessedUrl ?? "about:blank").then(() => guessedUrl, () => undefined)
     : undefined;
 
   let task: Task = { goal: taskText, startUrl: values.url, inputs, checks: values.check, ...callerParts };
-  if (report) {
-    if (!text) throw new Error("--report needs the text model (TEXT_MODEL_API_KEY); run `jev-browser setup`");
+  const planner = async (run: (t: TextModel) => Promise<Plan>) => {
     const t0 = performance.now();
-    const planned = await text.planReport(report);
+    const planned = await run(text!).catch((err: unknown) => {
+      throw new Error(`planner (${textCfg!.plan?.model ?? textCfg!.model}): ${err instanceof Error ? err.message : String(err)}`);
+    });
+    // Caller flags win over the plan; a plan's steps/observe/expect only apply as a set.
     task = {
-      goal: taskText || planned.goal,
+      goal: taskText && report ? taskText : planned.goal,
       startUrl: values.url ?? planned.startUrl,
       inputs: { ...planned.inputs, ...inputs },
-      checks: values.check,
+      checks: values.check ?? (planned.checks.length ? planned.checks : undefined),
       steps: values.step ?? planned.steps,
       observe: values.observe ?? planned.observe,
       expect: values.expect ?? planned.expect,
+      viewport: callerParts.viewport ?? planned.viewport,
+      answerFormat: callerParts.answerFormat ?? planned.answerFormat,
+      labels: planned.labels,
     };
     log(`plan (${Math.round(performance.now() - t0)}ms): ${JSON.stringify(task)}`);
-  } else if (text && !values["no-plan"] && !values.check?.length && !values.step?.length) {
-    const t0 = performance.now();
-    const planned = await text.plan(taskText);
-    task = { ...planned, startUrl: values.url ?? planned.startUrl, inputs: { ...planned.inputs, ...inputs }, ...callerParts };
-    log(`plan (${Math.round(performance.now() - t0)}ms): ${JSON.stringify(task)}`);
+  };
+  if (report) {
+    if (!text) throw new Error("--report needs the text model (TEXT_MODEL_API_KEY); run `jev-browser setup`");
+    await planner((t) => t.planReport(report));
+  } else if (planning) {
+    await planner((t) => t.plan(taskText));
   }
 
   // Count Jev tokens: input is billed ($0.042/MTok for jev-1.14), output is free.
@@ -203,14 +224,17 @@ async function main() {
   };
   log(`cost $${usage.totalUsd.toFixed(5)} · jev ${jevUsage.calls} calls ${jevUsage.inputTokens} in-tok · text ${text?.usage.calls ?? 0} calls ${text?.usage.inputTokens ?? 0}/${text?.usage.outputTokens ?? 0} tok`);
 
-  if (values.json) console.log(JSON.stringify({ ...result, usage }, null, 2));
+  if (values.json) console.log(JSON.stringify({ ...result, usage: roundUsage(usage) }, null, 2));
   else {
     if (result.answer) console.log(result.answer);
+    // With a requested answer format, stdout holds only that answer.
+    const out = task.answerFormat && result.answer ? log : (line: string) => console.log(line);
     if (result.verdict) {
       const pr = result.verdict.probabilities;
-      console.log(`${result.verdict.reproduced ? "REPRODUCED" : "NOT REPRODUCED"} (bug ${pr.bug.toFixed(2)} · expected ${pr.expected.toFixed(2)} · neither ${pr.neither.toFixed(2)})`);
+      out(`${result.verdict.reproduced ? "REPRODUCED" : "NOT REPRODUCED"} (bug ${pr.bug.toFixed(2)} · expected ${pr.expected.toFixed(2)} · neither ${pr.neither.toFixed(2)})`);
     }
-    for (const [o, p] of Object.entries(result.observed ?? {})) console.log(`${p >= 0.5 ? "YES" : "NO "} ${p.toFixed(2)}  ${o}`);
+    for (const [o, p] of Object.entries(result.observed ?? {})) out(`${p >= 0.5 ? "YES" : "NO "} ${p.toFixed(2)}  ${o}`);
+    for (const w of result.warnings ?? []) log(`warning: ${w}`);
     log(`${result.ok ? "ok" : `failed: ${result.reason}${result.error ? ` (${result.error})` : ""}`} · ${result.steps.length} actions · ${result.totalMs}ms · ${result.url}`);
   }
   process.exit(result.ok ? 0 : 1);

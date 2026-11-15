@@ -1,7 +1,10 @@
 // Planner consistency: does the report planner keep each report's key steps?
 // Usage: TEXT_PLAN_MODEL=... bun bench/plan-check.ts [runs]
 import { join } from "node:path";
+import { loadConfig } from "../src/setup.ts";
 import { TextModel, textModelFromEnv } from "../src/text.ts";
+
+await loadConfig();
 
 const runs = Number(process.argv[2] ?? 5);
 const reports = (await Bun.file(join(import.meta.dir, "bugs.md")).text()).split("\n## ").slice(1).map((s) => `## ${s.trim()}`);
@@ -23,7 +26,7 @@ for (const r of reports) {
     const plan = await text.planReport(r).catch((e) => ({ steps: [String(e)], observe: [], expect: "" }));
     times.push(performance.now() - t);
     let k = 0;
-    for (const step of plan.steps) if (k < must[id]!.length && must[id]![k]!.test(step)) k++;
+    for (const step of plan.steps ?? []) if (k < must[id]!.length && must[id]![k]!.test(step)) k++;
     const good = k === must[id]!.length && plan.observe.length > 0 && !!plan.expect;
     total++; if (good) ok++;
     if (!good) console.log(`${id} MISS: ${JSON.stringify(plan.steps)} obs=${JSON.stringify(plan.observe)}`);

@@ -162,6 +162,29 @@ jev-browser --url https://example.com/login --input email=a@b.co \
 
 Without `--check`, the planner writes its own end-state checks; with `--check`, it isn't called at all. For tasks like these, jev-browser is roughly as fast as an agent driving agent-browser itself. Its advantage is on multi-step flows.
 
+### Checking a claim, with a fixed answer format
+
+A plain task that asks to verify something is planned as a check, the same way as a report, and can be passed word for word:
+
+```bash
+jev-browser --session race --report - <<'EOF'   # or pass the same text as the positional task
+A client reports: "The ISBN is missing on the book page for The Lantern Keeper's Daughter."
+Open http://localhost:8888/books/the-lantern-keepers-daughter/ and check the book details panel. Decide whether the report is valid.
+
+Answer with exactly two lines:
+VERDICT: VALID or NOT REPRODUCIBLE
+EVIDENCE: one sentence on what you saw
+EOF
+# VERDICT: VALID
+# EVIDENCE: The ISBN field is not present in the book details panel, which only displays …
+```
+
+- The task text is given to the planner as data, so an instruction like "Answer with exactly two lines" is kept as the answer format instead of being answered.
+- A check with no steps (the start page already shows what to check) is judged on that page with no actions.
+- Jev still decides the verdict. The text model only writes it in the requested format, with the task's own verdict words (`VALID` / `NOT REPRODUCIBLE`). With a format, stdout holds only that answer; the `REPRODUCED` line moves to stderr.
+- "Set the viewport to 375x812" is applied before the page is judged (`--viewport 375x812` does the same). Every snapshot includes the page's content width against the viewport, so "the page scrolls sideways" can be judged.
+- `--answer-format "<format>"` sets the format when the task doesn't.
+
 ### Sharing a browser with agent-browser
 
 jev-browser drives the agent-browser **session** you name with `--session` (or `AGENT_BROWSER_SESSION`). It shares the same daemon, tabs, cookies and refs with you, Claude Code, or scripts using that session. When it finishes, carry on from the exact page:
@@ -191,6 +214,8 @@ jev-browser [options] --report <file|-> [-- <agent-browser global flags>]
 | `--observe <text>` | | The reported (buggy) behaviour to check on the final page (repeatable) |
 | `--expect <text>` | | The correct behaviour; with `--observe`, gives a bug/expected/neither verdict |
 | `--check <text>` | | End state required for a plain task to count as done (repeatable); skips planning |
+| `--answer-format <text>` | | Write the final answer in this format (found in the task text when planned) |
+| `--viewport <WxH>` | | Set the browser viewport first, e.g. `375x812`; it stays set for the session |
 | `--no-plan` | | Never call the planner |
 | `--no-vision` | | Disable the screenshot (box) fallback |
 | `--max-steps <n>` | 25 | Maximum decision rounds |
@@ -209,6 +234,7 @@ jev-browser [options] --report <file|-> [-- <agent-browser global flags>]
 {
   "ok": true,
   "reason": "done",                // done | max_steps | stuck | uncertain | error
+  "warnings": ["…"],               // only when something needs a look, e.g. the verdict matched neither
   "goal": "Reproduce: …",
   "url": "http://localhost:4173/shop",
   "verdict": { "reproduced": true, "probabilities": { "bug": 0.975, "expected": 0.01, "neither": 0.015 } },
@@ -225,7 +251,9 @@ jev-browser [options] --report <file|-> [-- <agent-browser global flags>]
 }
 ```
 
-`reason: "uncertain"` means Jev had no confident next move for two rounds in a row. The goal may already be met, or it may need a different approach. jev-browser stops rather than guess.
+`reason: "uncertain"` means Jev had no confident next move for two rounds in a row. The goal may already be met, or it may need a different approach. jev-browser stops rather than guess. `reason: "stuck"` with `error: "looping: …"` means three actions in a row left the page unchanged. A verdict where `neither` wins also ends as `uncertain` (exit 1), with the verdict and any formatted answer still included: treat it as "look at the page", not as "not reproduced".
+
+Errors name the stage that failed: `planner (<model>): …`, `jev (<model>): …`, `agent-browser <command>: …` or `text model …`.
 
 ## Using it from coding agents
 
@@ -270,8 +298,8 @@ bug report ─► plan (gpt-oss-20b ×2, ~0.7s, overlapped with opening the star
           ─► page-only Jev verdict, asked in parallel every round: bug vs expected vs neither
 ```
 
-1. **Plan** (`--report` only): gpt-oss-20b turns the report into a start URL, inputs, single-action steps, and actual vs expected behaviour. It's sampled twice in parallel and the longer plan is kept, because the model occasionally drops trailing steps. Meanwhile, the URL found in the report is opened, so the ~0.5s browser launch overlaps planning.
-2. **Look** (~60ms): `agent-browser snapshot -i` (interactive elements with `@eN` refs and their checked/selected state) and `get text body` (everything a user can read) run in parallel. `snapshot -c` isn't used because it drops text such as totals and status messages.
+1. **Plan**: gpt-oss-20b turns the report (or a plain task) into a start URL, inputs, single-action steps, actual vs expected behaviour, and any requested answer format and window size. The text goes in as data between tags, so a task that says "Answer with…" is planned rather than answered. It's sampled twice in parallel and the longer plan is kept, because the model occasionally drops trailing steps, unless the longer plan types values it never declared (an invented search step once won this way). If neither sample is valid JSON it's asked once more. Comparisons with earlier states ("still", "again", "back on") are removed from actual and expected, since the verdict only sees the final page. Meanwhile, the URL found in the text is opened, so the ~0.5s browser launch overlaps planning.
+2. **Look** (~60ms): `agent-browser snapshot -i` (interactive elements with `@eN` refs and their checked/selected state), `get text body` (everything a user can read) and a layout measure (content width against the viewport, i.e. whether the page scrolls sideways) run in parallel. `snapshot -c` isn't used because it drops text such as totals and status messages.
 3. **Moves** (`src/moves.ts`): each element becomes complete actions, e.g. `click button "Add"`, `type email into textbox "Email"` or `choose "India" in combobox "Country"`, plus Enter, scroll, back, reload and finish. Jev answers each question independently, so it picks a whole move rather than a verb and a target separately. Lists over 255 moves are split into chunks within the same request.
 4. **Decide** (~280ms): one Jev request confirms the steps already acted on and picks a move for every remaining step (up to 8 ahead) against the current page. A second request runs in parallel, sees only the page (no goal, steps or history) and judges `--observe` vs `--expect`. The verdict is asked twice with the options in different orders and averaged.
 5. **Act (chain):** the picks run back to back. The chain carries on through fills, selects and toggles. After an in-page button click, a 50ms snapshot confirms the URL is unchanged and the next element still exists. It stops at links, Enter, reload and back, at any pick below 0.85 confidence, and at a pick that would reuse an element already used in the chain. A whole form takes one request.
@@ -280,7 +308,10 @@ bug report ─► plan (gpt-oss-20b ×2, ~0.7s, overlapped with opening the star
    - A step that was acted on is never redone on a guess below 0.5.
    - A click that navigated away is never repeated on that page.
    - Two low-confidence rounds in a row end the run as `uncertain`.
-   - If no move is confident enough, Jev finds the target on a screenshot (`box`) and the agent clicks it.
+   - An action that left the page unchanged isn't repeated on that page, and three such rounds in a row end the run as `stuck` (this stops scroll up/down/reload loops).
+   - A check with `--observe` but no steps or checks is read-only: it's judged on the page it opened, with no actions.
+   - If no move is confident enough, Jev finds the target on a screenshot (`box`) and the agent clicks it, but only when the box confidence is at least 0.5.
+   - agent-browser's "Inspected target navigated or closed" error is retried after the page loads (a navigating command such as `back` counts as done).
 
 The `@typesafe-ai/sdk` 0.7.0 client fails under Bun ("Body already used"); `src/cli.ts` passes it a buffered `fetch` to work around this.
 
@@ -323,7 +354,7 @@ MODE=report bun bench/jev-repro.ts 3                               # expect repr
 MODE=report BASE=http://localhost:4174 bun bench/jev-repro.ts 2    # expect reproduced 0/10
 ```
 
-Latest standalone result: 15/15 reproduced on the buggy app and 0/10 on the fixed app, at a median of about 2.4s per bug including browser launch.
+Latest standalone result (v0.3.0): 15/15 reproduced on the buggy app and 0/10 on the fixed app, at a median of about 2.8s per bug including browser launch (2.4s on the fixed app). With explicit flags: 10/10 and 0/10, median 2.2s. `plan-check`: 30/30 complete plans.
 
 ### Agent → jev-browser vs agent → agent-browser
 
@@ -347,6 +378,8 @@ An earlier comparison on general browsing tasks (httpbin form, HN, Wikipedia) fo
 | Anything about setup | Run `jev-browser doctor`; it prints the fix for each failed check |
 | `TYPESAFE_API_KEY is not set` | `jev-browser setup`, or export it |
 | `--report needs the text model` | `jev-browser setup` to add `TEXT_MODEL_API_KEY` |
+| `planner (…): returned invalid JSON` | Both samples and the retry failed. Re-run, or pass `--url`/`--step`/`--observe`/`--expect` yourself |
+| `reason: stuck`, `looping` | Three actions in a row didn't change the page. Look at the page, then pass explicit `--step`s |
 | `Body already used` | You're calling `TypeSafeClient` without `bufferedFetch` (see `src/cli.ts`) |
 | `agent-browser …: Unknown ref` | The page changed under a chain; re-run |
 | `reason: uncertain` | Jev had no confident move. Look at the page (`agent-browser --session s screenshot`), then re-run with explicit `--step`s |

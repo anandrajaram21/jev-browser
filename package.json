@@ -1,6 +1,6 @@
 {
   "name": "jev-browser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Fast browser agent: agent-browser for the hands, TypeSafe Jev for the decisions",
   "type": "module",
   "private": true,

@@ -15,10 +15,30 @@ export interface Snapshot {
   url: string;
   text: string; // interactive accessibility tree with refs
   visibleText: string; // document.body.innerText: everything a user can read, which the tree omits
+  layout: string; // viewport size and whether the page scrolls sideways, which neither text shows
   elements: PageElement[];
 }
 
 export class BrowserError extends Error {}
+
+// The page navigated while agent-browser was evaluating in it. A navigating
+// command has done its job by then; a read just needs the new page to load.
+const TRANSIENT = /Inspected target navigated or closed|Execution context was destroyed|Cannot find context with specified id/i;
+const NAVIGATING = new Set(["back", "forward", "reload", "open", "click", "press", "mouse"]);
+
+// Content width against the viewport. Overflow hidden on <html>/<body> clips
+// wide content, so the page doesn't scroll sideways even when it's wider.
+const LAYOUT_JS = `(() => { const s = document.scrollingElement || document.documentElement;
+  const clipped = [document.documentElement, document.body].some((e) => e && /hidden|clip/.test(getComputedStyle(e).overflowX));
+  return [s.scrollWidth, innerWidth, innerHeight, clipped]; })()`;
+
+export function describeLayout([contentWidth, width, height, clipped]: [number, number, number, boolean]): string {
+  const view = `viewport ${width}x${height}px, page content ${contentWidth}px wide`;
+  if (contentWidth <= width + 1) return `${view}: fits the viewport width, no horizontal scrolling`;
+  return clipped
+    ? `${view}: wider than the viewport but clipped, no horizontal scrolling`
+    : `${view}: wider than the viewport, the page scrolls sideways (horizontal scrolling)`;
+}
 
 export class Browser {
   constructor(
@@ -27,6 +47,18 @@ export class Browser {
   ) {}
 
   async run<T = any>(...args: string[]): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.runOnce<T>(...args);
+      } catch (err) {
+        if (attempt >= 3 || !(err instanceof BrowserError) || !TRANSIENT.test(err.message)) throw err;
+        await this.runOnce("wait", "--load", "domcontentloaded").catch(() => {});
+        if (NAVIGATING.has(args[0]!)) return {} as T;
+      }
+    }
+  }
+
+  private async runOnce<T>(...args: string[]): Promise<T> {
     const proc = Bun.spawn(["agent-browser", "--session", this.session, ...this.globalArgs, "--json", ...args], {
       stdout: "pipe",
       stderr: "pipe",
@@ -46,11 +78,16 @@ export class Browser {
   // `snapshot -c` drops text such as prices and status messages, and a full
   // snapshot is verbose, so pair the interactive tree with the visible text.
   async snapshot(): Promise<Snapshot> {
-    const [data, body] = await Promise.all([
+    const [data, body, layout] = await Promise.all([
       this.run<{ origin: string; snapshot: string }>("snapshot", "-i"),
       this.run<{ text: string }>("get", "text", "body"),
+      this.run<{ result: [number, number, number, boolean] }>("eval", LAYOUT_JS).then((r) => describeLayout(r.result), () => ""),
     ]);
-    return { url: data.origin, text: data.snapshot, visibleText: body.text ?? "", elements: parseSnapshot(data.snapshot) };
+    return { url: data.origin, text: data.snapshot, visibleText: body.text ?? "", layout, elements: parseSnapshot(data.snapshot) };
+  }
+
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.run("set", "viewport", String(width), String(height));
   }
 
   async title(): Promise<string> {
