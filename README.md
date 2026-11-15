@@ -34,11 +34,34 @@ When a coding agent hands bug reports to `jev-browser` instead of driving agent-
 
 ## Install
 
+You need agent-browser plus a TypeSafe key and an OpenRouter key (see [Requirements](#requirements)). Bun isn't needed: releases ship as one standalone binary.
+
+```bash
+# 1. agent-browser and its Chrome (skip if you have them)
+npm i -g agent-browser && agent-browser install      # or: brew install agent-browser
+
+# 2. jev-browser (macOS and Linux, x64 and arm64)
+curl -fsSL https://raw.githubusercontent.com/anandrajaram21/jev-browser/main/install.sh | sh
+#   or: npm i -g @anandrajaram21/jev-browser
+#   or: brew install anandrajaram21/tap/jev-browser   (also installs agent-browser)
+
+# 3. keys, agent skill, check
+jev-browser setup           # prompts for both keys, saves ~/.config/jev-browser/config (mode 600)
+jev-browser install-skill   # Claude Code, Codex, Cursor and ~/.agents, whichever you have
+jev-browser doctor          # agent-browser, browser launch, both keys, skill
+```
+
+`install.sh` puts the binary in `~/.local/bin`. Set `JEV_BROWSER_INSTALL_DIR` to put it somewhere else, or `JEV_BROWSER_VERSION=v0.1.0` to pin a release. On Windows, download `jev-browser-windows-x64.exe` from [Releases](https://github.com/anandrajaram21/jev-browser/releases) (untested).
+
+For agents and CI without a terminal, `setup` saves the keys already in the environment instead of prompting: `TYPESAFE_API_KEY=… TEXT_MODEL_API_KEY=… jev-browser setup`.
+
+### From source
+
 ```bash
 git clone git@github.com:anandrajaram21/jev-browser.git
 cd jev-browser
 bun install
-cp .env.example .env        # then fill in the two API keys
+cp .env.example .env        # then fill in the two keys (or use `bun src/cli.ts setup`)
 bun link                    # puts `jev-browser` on your PATH (bin: src/cli.ts)
 jev-browser --help
 ```
@@ -57,7 +80,7 @@ agent-browser --session smoke close; kill %1
 
 ## Configuration
 
-Settings are read from the environment, and from the `.env` next to `package.json`. That file is loaded even when you run `jev-browser` from another directory; variables already set in the environment take precedence.
+Settings come from, in order of precedence: environment variables, `.env` in the current directory, the `.env` next to `package.json` in a source checkout, and the user config `~/.config/jev-browser/config` (or `$XDG_CONFIG_HOME/jev-browser/config`, or the path in `JEV_BROWSER_CONFIG`). `jev-browser setup` writes the user config from `.env.example` with your keys filled in, so it gets the recommended models below.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -75,7 +98,7 @@ Settings are read from the environment, and from the `.env` next to `package.jso
 | `AGENT_BROWSER_SESSION` | `default` | Session to drive when `--session` isn't given |
 | `AGENT_BROWSER_*` | | Any other agent-browser setting (e.g. `AGENT_BROWSER_HEADED=1`); see `agent-browser --help` |
 
-Recommended `.env` (also in `.env.example`):
+Recommended settings (`.env.example`, and what `setup` writes):
 
 ```
 TYPESAFE_API_KEY=
@@ -204,7 +227,22 @@ jev-browser [options] --report <file|-> [-- <agent-browser global flags>]
 
 ## Using it from coding agents
 
-`skills/jev-browser/SKILL.md` is a Claude Code skill. It tells the agent when to hand work to jev-browser, to prefer `--report`, and how to write steps and observations. To install it for all your projects:
+`skills/jev-browser/SKILL.md` is an agent skill. It tells the agent when to hand work to jev-browser, to prefer `--report`, and how to write steps and observations. Install it any of these ways:
+
+```bash
+jev-browser install-skill                           # copies the skill bundled in the binary into ~/.claude, ~/.codex, ~/.cursor
+                                                    # and ~/.agents skills folders that exist (or --dir <skills-dir>)
+npx skills add anandrajaram21/jev-browser           # the cross-agent skills CLI
+```
+
+or, in Claude Code, as a plugin:
+
+```
+/plugin marketplace add anandrajaram21/jev-browser
+/plugin install jev-browser@jev-browser
+```
+
+Re-run `install-skill` after upgrading so the skill matches the CLI. If you develop jev-browser, symlink the skill instead so it follows your checkout (`install-skill` leaves symlinks alone):
 
 ```bash
 mkdir -p ~/.claude/skills && ln -s "$PWD/skills/jev-browser" ~/.claude/skills/jev-browser
@@ -304,8 +342,9 @@ An earlier comparison on general browsing tasks (httpbin form, HN, Wikipedia) fo
 
 | Symptom | Fix |
 |---|---|
-| `TYPESAFE_API_KEY is not set` | Add it to the `.env` next to `package.json`, or export it |
-| `--report needs the text model` | Set `TEXT_MODEL_API_KEY` |
+| Anything about setup | Run `jev-browser doctor`; it prints the fix for each failed check |
+| `TYPESAFE_API_KEY is not set` | `jev-browser setup`, or export it |
+| `--report needs the text model` | `jev-browser setup` to add `TEXT_MODEL_API_KEY` |
 | `Body already used` | You're calling `TypeSafeClient` without `bufferedFetch` (see `src/cli.ts`) |
 | `agent-browser …: Unknown ref` | The page changed under a chain; re-run |
 | `reason: uncertain` | Jev had no confident move. Look at the page (`agent-browser --session s screenshot`), then re-run with explicit `--step`s |
@@ -318,6 +357,15 @@ An earlier comparison on general browsing tasks (httpbin form, HN, Wikipedia) fo
 ```bash
 bun test          # offline unit tests
 bun check         # type check
+bun run build     # standalone binaries, SHA256SUMS, Homebrew formula and npm packages in dist/
+bun scripts/build.ts --current   # just this machine's binary
 ```
+
+### Releasing
+
+Bump `version` in `package.json` and `.claude-plugin/plugin.json` (the build checks they match), merge, then push a matching tag (`git tag v0.2.0 && git push origin v0.2.0`). `.github/workflows/release.yml` tests, builds every target on macOS and creates the GitHub release that `install.sh` downloads from. Two optional steps run only when their repository secrets are set:
+
+- `NPM_TOKEN` publishes `@anandrajaram21/jev-browser` and its per-platform packages. The unscoped `jev-browser` name on npm belongs to someone else. Override the scope with `NPM_SCOPE` in `scripts/build.ts`.
+- `HOMEBREW_TAP_TOKEN` (a token with write access to `anandrajaram21/homebrew-tap`) pushes `Formula/jev-browser.rb` to that tap. Create the tap repo first.
 
 See `AGENTS.md` for the architecture, the measuring rules every change must follow, and known gotchas.

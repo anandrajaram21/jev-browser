@@ -10,7 +10,8 @@
   "scripts": {
     "start": "bun src/cli.ts",
     "test": "bun test",
-    "typecheck": "bun check"
+    "typecheck": "bun check",
+    "build": "bun scripts/build.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"

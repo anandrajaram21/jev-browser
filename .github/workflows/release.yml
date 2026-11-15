@@ -1,0 +1,53 @@
+# Push a tag matching package.json's version (e.g. v0.1.0) to publish a release.
+# npm and Homebrew publishing run only when their secrets are set.
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun check
+      - run: bun scripts/build.ts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+      - run: dist/jev-browser-darwin-arm64 --version
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/jev-browser-* dist/SHA256SUMS install.sh --title "$GITHUB_REF_NAME" --generate-notes
+
+      - name: npm
+        if: env.NPM_TOKEN != ''
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+          for dir in dist/npm/jev-browser-*/; do npm publish "$dir" --access public; done
+          npm publish dist/npm/jev-browser --access public
+
+      - name: Homebrew tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/anandrajaram21/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp dist/homebrew/jev-browser.rb tap/Formula/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/jev-browser.rb
+          git commit -m "jev-browser $GITHUB_REF_NAME"
+          git push

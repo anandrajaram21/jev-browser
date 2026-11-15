@@ -1,0 +1,16 @@
+{
+  "name": "jev-browser",
+  "owner": {
+    "name": "Anand Rajaram"
+  },
+  "metadata": {
+    "description": "jev-browser: a fast browser agent CLI and the skill that tells coding agents when to use it"
+  },
+  "plugins": [
+    {
+      "name": "jev-browser",
+      "source": "./",
+      "description": "Skill for handing well-defined browser tasks and bug reproductions to the jev-browser CLI"
+    }
+  ]
+}
