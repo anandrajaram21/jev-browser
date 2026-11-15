@@ -1,0 +1,10 @@
+{
+  "name": "jev-browser",
+  "version": "0.1.0",
+  "description": "Skill for handing well-defined browser tasks and bug reproductions to the jev-browser CLI",
+  "author": {
+    "name": "Anand Rajaram"
+  },
+  "homepage": "https://github.com/anandrajaram21/jev-browser",
+  "repository": "https://github.com/anandrajaram21/jev-browser"
+}

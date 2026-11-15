@@ -7,6 +7,15 @@ description: Hand a self-contained browser task (navigate, search, fill and subm
 
 `jev-browser` runs a fast observe → decide → act loop on an agent-browser session: it snapshots the page, Jev picks one complete move (click/fill/select/scroll/back/finish), agent-browser runs it, repeat until Jev's success checks pass. A small text model (gpt-oss-20b) only plans the task up front, writes free text when needed, and phrases the final answer.
 
+## Install (if `jev-browser` isn't on PATH)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anandrajaram21/jev-browser/main/install.sh | sh
+jev-browser doctor    # prints the fix for anything missing
+```
+
+It needs agent-browser (`npm i -g agent-browser && agent-browser install`) and two API keys, which the user saves with `jev-browser setup`. Ask the user for the keys; never guess them or print them.
+
 ## Run it
 
 ```bash

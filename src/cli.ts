@@ -1,15 +1,25 @@
 #!/usr/bin/env bun
 import { TypeSafeClient } from "@typesafe-ai/sdk";
-import { join } from "node:path";
 import { parseArgs } from "node:util";
+import pkg from "../package.json";
 import { runAgent, type Task } from "./agent.ts";
 import { Browser } from "./browser.ts";
+import { CONFIG_PATH, doctor, installSkill, loadConfig, setup } from "./setup.ts";
 import { TextModel, textModelFromEnv } from "./text.ts";
 
 const HELP = `jev-browser - fast browser agent: agent-browser acts, TypeSafe Jev decides
 
 Usage: jev-browser [options] "<task>" [-- <agent-browser global flags>]
        jev-browser [options] --report <file|-> [-- <agent-browser global flags>]
+       jev-browser <command>
+
+Commands:
+  setup                 Save your TypeSafe and OpenRouter API keys to the user config
+                        (prompts on a terminal; otherwise saves the keys set in the environment)
+  doctor                Check agent-browser, the browser, both API keys and the agent skill
+  install-skill [--dir <skills-dir>]
+                        Install the agent skill for Claude Code, Codex, Cursor and ~/.agents
+                        (whichever exist), or into the given skills directories
 
 Options:
   --session <name>      agent-browser session to drive (default: $AGENT_BROWSER_SESSION or "default")
@@ -34,22 +44,14 @@ Options:
   --page-chars <n>      Page snapshot characters sent to Jev per step (default 12000)
   --json                Print the result as JSON on stdout
   -q, --quiet           No progress lines on stderr
+  -v, --version         Print the version
 
 Examples:
   jev-browser "search hacker news for bun 2.0 and open the top result"
   jev-browser --session work --url https://example.com/login --input email=a@b.co --check "The account dashboard is shown" "log in"
-  jev-browser "find the price of the first result" -- --headed`;
+  jev-browser "find the price of the first result" -- --headed
 
-// Bun only auto-loads .env from the cwd; also load the one next to this package
-// so the CLI works from any directory (e.g. when Claude Code runs it).
-async function loadPackageEnv() {
-  const file = Bun.file(join(import.meta.dir, "..", ".env"));
-  if (!(await file.exists())) return;
-  for (const line of (await file.text()).split("\n")) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/.exec(line);
-    if (m && process.env[m[1]!] === undefined) process.env[m[1]!] = m[2]!.replace(/^(['"])(.*)\1$/, "$2");
-  }
-}
+Config: environment variables, then ./.env, then ${CONFIG_PATH}`;
 
 // @typesafe-ai/sdk 0.7.0 locks `response.body` with getReader() and then calls
 // `response.text()`, which Bun rejects ("Body already used"). Hand it a
@@ -63,7 +65,20 @@ const bufferedFetch = async (input: string, init?: RequestInit) => {
 
 const JEV_INPUT_USD_PER_MTOK = 0.042; // TypeSafe list price for jev-1.13/1.14 input; output is free
 
+const jevClient = () => new TypeSafeClient({ fetch: bufferedFetch, timeout: 8000, logLevel: "error" });
+
 async function main() {
+  const command = process.argv[2];
+  if (command === "setup") return setup();
+  if (command === "install-skill") {
+    const { values } = parseArgs({ args: process.argv.slice(3), options: { dir: { type: "string", multiple: true } } });
+    return installSkill(values.dir);
+  }
+  if (command === "doctor") {
+    await loadConfig();
+    process.exit(await doctor(jevClient));
+  }
+
   const dashdash = process.argv.indexOf("--");
   const own = dashdash === -1 ? process.argv.slice(2) : process.argv.slice(2, dashdash);
   const passthrough = dashdash === -1 ? [] : process.argv.slice(dashdash + 1);
@@ -90,8 +105,10 @@ async function main() {
       json: { type: "boolean" },
       quiet: { type: "boolean", short: "q" },
       help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
     },
   });
+  if (values.version) return console.log(pkg.version);
   const report = values.report === undefined ? undefined : values.report === "-" ? await Bun.stdin.text() : await Bun.file(values.report).text();
   const taskText = positionals.join(" ").trim();
   if (values.help || (!taskText && !report)) {
@@ -99,8 +116,8 @@ async function main() {
     process.exit(values.help ? 0 : 2);
   }
 
-  await loadPackageEnv();
-  if (!process.env.TYPESAFE_API_KEY) throw new Error("TYPESAFE_API_KEY is not set");
+  await loadConfig();
+  if (!process.env.TYPESAFE_API_KEY) throw new Error("TYPESAFE_API_KEY is not set; run `jev-browser setup`");
   const log = values.quiet ? () => {} : (line: string) => process.stderr.write(`${line}\n`);
 
   const textCfg = textModelFromEnv();
@@ -124,7 +141,7 @@ async function main() {
 
   let task: Task = { goal: taskText, startUrl: values.url, inputs, checks: values.check, ...callerParts };
   if (report) {
-    if (!text) throw new Error("--report needs the text model (TEXT_MODEL_API_KEY)");
+    if (!text) throw new Error("--report needs the text model (TEXT_MODEL_API_KEY); run `jev-browser setup`");
     const t0 = performance.now();
     const planned = await text.planReport(report);
     task = {
@@ -145,7 +162,7 @@ async function main() {
   }
 
   // Count Jev tokens: input is billed ($0.042/MTok for jev-1.14), output is free.
-  const jevRaw = new TypeSafeClient({ fetch: bufferedFetch, timeout: 8000, logLevel: "error" });
+  const jevRaw = jevClient();
   const jevUsage = { calls: 0, inputTokens: 0, outputTokens: 0 };
   const jev = Object.assign(Object.create(jevRaw), {
     systemOne: (...args: Parameters<TypeSafeClient["systemOne"]>) =>

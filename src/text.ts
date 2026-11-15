@@ -71,6 +71,11 @@ export class TextModel {
     return data.choices[0]?.message.content?.trim() ?? "";
   }
 
+  /** One tiny completion, to check the key and model work (`jev-browser doctor`). */
+  async ping(): Promise<void> {
+    await this.complete("Reply with OK.", "OK", false);
+  }
+
   /** Split a natural-language task into a goal, an optional start URL and the literal values it will need to type. */
   async plan(task: string): Promise<{ goal: string; startUrl?: string; inputs: Record<string, string>; checks: string[] }> {
     const out = await this.complete(

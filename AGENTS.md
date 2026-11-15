@@ -20,7 +20,12 @@ src/agent.ts        the loop: observe → decide (one Jev request + parallel pag
 src/moves.ts        snapshot elements → complete moves ("click button X", "type email into textbox Y", …)
 src/browser.ts      agent-browser subprocess wrapper + snapshot text parser
 src/text.ts         OpenRouter client: task planning, bug-report planning, free text, answers
-src/moves.test.ts   offline unit tests (bun test)
+src/setup.ts        config loading, and the setup / doctor / install-skill commands
+src/*.test.ts       offline unit tests (bun test)
+scripts/build.ts    compiles release binaries, SHA256SUMS, Homebrew formula and npm packages into dist/
+install.sh          curl | sh installer that downloads a release binary
+.claude-plugin/     Claude Code plugin marketplace manifest (ships the skill)
+.github/workflows/  CI (test, check, build) and tag-triggered release
 skills/jev-browser/ the Claude Code skill other agents load to use the CLI
 bench/app/server.ts test app with 5 planted bugs (FIXED=1 fixes them all; used as a false-positive control)
 bench/bugs.md       the 5 bug reports, written the way users write them
@@ -36,6 +41,7 @@ bun install
 bun test                                   # offline unit tests, must pass
 bun check                                  # type check, must be clean
 bun src/cli.ts --help
+bun scripts/build.ts --current             # compiled binary for this machine in dist/
 
 # End-to-end (needs TYPESAFE_API_KEY and TEXT_MODEL_API_KEY in .env, plus agent-browser installed)
 bun bench/app/server.ts 4173 &             # buggy app
@@ -68,5 +74,6 @@ bun bench/text-models.ts 3                 # compare text models
 - Bun only auto-loads `.env` from the current directory, so `cli.ts` also loads the `.env` next to `package.json`. That lets the CLI run from any directory.
 - `agent-browser batch --json` returns an array, not the usual `{success, data}` object. `Browser.run` expects the latter, so don't use `batch` through it.
 - `agent-browser session` doesn't launch a browser; `open about:blank` does. The CLI warms the browser by opening the report's URL while the planner runs.
+- Release binaries are `bun build --compile` output: `.env.example` and `SKILL.md` are embedded through `with { type: "text" }` imports in `src/setup.ts`. Anything else the CLI reads at runtime must be embedded the same way, because a binary has no checkout next to it.
 - Jev `choice` questions allow at most 255 options. `decide` splits larger move lists into chunks within the same request.
 - Jev's answers vary a little between identical calls. Run each benchmark at least twice before drawing conclusions.
