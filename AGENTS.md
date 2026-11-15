@@ -21,6 +21,7 @@ src/moves.ts        snapshot elements → complete moves ("click button X", "typ
 src/browser.ts      agent-browser subprocess wrapper + snapshot text parser
 src/text.ts         OpenRouter client: task planning, bug-report planning, free text, answers
 src/setup.ts        config loading, and the setup / doctor / install-skill commands
+src/update.ts       the update command: swaps the binary for a GitHub release (checksum-verified)
 src/*.test.ts       offline unit tests (bun test)
 scripts/build.ts    compiles release binaries, SHA256SUMS, Homebrew formula and npm packages into dist/
 install.sh          curl | sh installer that downloads a release binary

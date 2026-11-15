@@ -53,6 +53,8 @@ jev-browser doctor          # agent-browser, browser launch, both keys, skill
 
 `install.sh` puts the binary in `~/.local/bin`. Set `JEV_BROWSER_INSTALL_DIR` to put it somewhere else, or `JEV_BROWSER_VERSION=v0.1.0` to pin a release. On Windows, download `jev-browser-windows-x64.exe` from [Releases](https://github.com/anandrajaram21/jev-browser/releases) (untested).
 
+To upgrade, run `jev-browser update` (or `jev-browser update 0.2.0` for a specific release). It downloads the release for your platform, checks it against `SHA256SUMS` and replaces the binary in place. Homebrew and npm installs print `brew upgrade jev-browser` or `npm i -g @anandrajaram21/jev-browser@latest` instead, so the package manager stays in charge.
+
 For agents and CI without a terminal, `setup` saves the keys already in the environment instead of prompting: `TYPESAFE_API_KEY=… TEXT_MODEL_API_KEY=… jev-browser setup`.
 
 ### From source
@@ -242,7 +244,7 @@ or, in Claude Code, as a plugin:
 /plugin install jev-browser@jev-browser
 ```
 
-Re-run `install-skill` after upgrading so the skill matches the CLI. If you develop jev-browser, symlink the skill instead so it follows your checkout (`install-skill` leaves symlinks alone):
+Re-run `install-skill` after `jev-browser update` so the skill matches the CLI. If you develop jev-browser, symlink the skill instead so it follows your checkout (`install-skill` leaves symlinks alone):
 
 ```bash
 mkdir -p ~/.claude/skills && ln -s "$PWD/skills/jev-browser" ~/.claude/skills/jev-browser
