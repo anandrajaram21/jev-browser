@@ -6,6 +6,7 @@ import { runAgent, type Task } from "./agent.ts";
 import { Browser } from "./browser.ts";
 import { CONFIG_PATH, doctor, installSkill, loadConfig, setup } from "./setup.ts";
 import { TextModel, textModelFromEnv } from "./text.ts";
+import { update } from "./update.ts";
 
 const HELP = `jev-browser - fast browser agent: agent-browser acts, TypeSafe Jev decides
 
@@ -20,6 +21,8 @@ Commands:
   install-skill [--dir <skills-dir>]
                         Install the agent skill for Claude Code, Codex, Cursor and ~/.agents
                         (whichever exist), or into the given skills directories
+  update [<version>]    Update to the latest GitHub release, or to the given version
+                        (Homebrew and npm installs: prints the command to use instead)
 
 Options:
   --session <name>      agent-browser session to drive (default: $AGENT_BROWSER_SESSION or "default")
@@ -74,6 +77,7 @@ async function main() {
     const { values } = parseArgs({ args: process.argv.slice(3), options: { dir: { type: "string", multiple: true } } });
     return installSkill(values.dir);
   }
+  if (command === "update") return update(process.argv[3]);
   if (command === "doctor") {
     await loadConfig();
     process.exit(await doctor(jevClient));
